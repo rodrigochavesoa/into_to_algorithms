@@ -1,4 +1,2 @@
-bigon_book*.db
-bigon_*.db
-!bigon_bookV.db
-!bigon_V.db
+phone_book/generate_names/db/*.db
+!phone_book/generate_names/db/bigon_bookV.db
