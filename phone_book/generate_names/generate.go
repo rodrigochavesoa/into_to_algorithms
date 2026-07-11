@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	defaultDBFile = "phone_book/generate_names/db/bigon_bookX.db"
+	defaultDBFile = "phone_book/generate_names/db/bigon_bookV.db"
 	batchSize     = int64(40_320)
 )
 
@@ -28,7 +28,7 @@ func main() {
 	dbPath := flag.String("db", defaultDBFile, "caminho para o banco SQLite")
 	flag.Parse()
 
-	n := 10 // Para 9, o total de combinações é 9! = 362880.
+	n := 5 // Para 9, o total de combinações é 9! = 362880.
 
 	var err error
 	// Assegura que a pasta do DB existe

@@ -1,0 +1,4 @@
+bigon_book*.db
+bigon_*.db
+!bigon_bookV.db
+!bigon_V.db
