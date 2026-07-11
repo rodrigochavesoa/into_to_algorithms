@@ -16,7 +16,10 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const defaultDBFile = "phone_book/generate_names/db/bigon_bookV.db"
+const (
+	defaultDBFile = "phone_book/generate_names/db/bigon_bookX.db"
+	batchSize     = int64(40_320)
+)
 
 var db *sql.DB
 var sinalInterrupcao chan os.Signal
@@ -25,7 +28,7 @@ func main() {
 	dbPath := flag.String("db", defaultDBFile, "caminho para o banco SQLite")
 	flag.Parse()
 
-	n := 8 // Para 8, o total de combinações é 8! = 40320.
+	n := 10 // Para 9, o total de combinações é 9! = 362880.
 
 	var err error
 	// Assegura que a pasta do DB existe
@@ -79,8 +82,8 @@ func main() {
 	lastNames := []string{"Silva", "Santos", "Oliveira", "Souza", "Pereira", "Lima", "Gomes", "Ribeiro", "Ferreira", "Almeida"}
 	middles := []string{"A.", "B.", "C.", "D.", "E.", "F.", "G.", "H.", "I.", "J."} // iniciais reduzidas
 
-	// alvo desejado de nomes únicos (ex.: 44000)
-	const desiredUniqueNames int64 = 44000
+	// alvo desejado de nomes únicos
+	const desiredUniqueNames int64 = 3_628_800
 	maxCombinations := factorial(n)
 	if desiredUniqueNames > maxCombinations {
 		log.Printf("alvo de %d nomes é maior que as %d permutações possíveis para N=%d", desiredUniqueNames, maxCombinations, n)
@@ -104,9 +107,17 @@ func main() {
 		log.Printf("Expandido middles para %d entradas; nova capacidade=%d", len(middles), capacity)
 	}
 
+	if últimoNum >= desiredUniqueNames {
+		fmt.Printf("🎉 Meta de %d registros já foi atingida.\n", desiredUniqueNames)
+		return
+	}
+
 	if últimoNum > 0 {
 		fmt.Printf("📦 Checkpoint encontrado! Retomando a partir da combinação nº %d\n", últimoNum)
 		arr = stringToSlice(últimaString)
+		if len(arr) != n {
+			log.Fatalf("checkpoint possui permutação de tamanho %d, mas N=%d", len(arr), n)
+		}
 		temProxima := proximaPermutacao(arr)
 		if !temProxima {
 			fmt.Println("🎉 Todas as combinações possíveis já foram processadas e salvas!")
@@ -137,52 +148,71 @@ func main() {
 		runID, _ = res.LastInsertId()
 	}
 
-	// Gerar até atingir desiredUniqueNames (a partir do checkpoint)
-	for {
+	tx, stmt, err := beginInsertBatch(db)
+	if err != nil {
+		log.Fatalf("Erro ao iniciar lote de inserção: %v", err)
+	}
+	batchRows := int64(0)
+
+	// A meta é total, não adicional ao checkpoint anterior.
+	for totalCombinacoesEncontradas < desiredUniqueNames {
 		select {
 		case <-sinalInterrupcao:
+			if batchRows > 0 {
+				if err := commitInsertBatch(tx, stmt); err != nil {
+					log.Fatalf("Erro ao confirmar checkpoint interrompido: %v", err)
+				}
+			}
 			endTime := time.Now()
 			dur := endTime.Sub(startTime)
-			fmt.Printf("\n🛑 Interrupção detectada! Último checkpoint garantido no banco: nº %d\n", totalCombinacoesEncontradas)
+			fmt.Printf("\n🛑 Interrupção detectada! Checkpoint salvo no banco: nº %d\n", totalCombinacoesEncontradas)
 			fmt.Printf("Hora de início: %s\n", startTime.Format("2006-01-02 15:04:05"))
 			fmt.Printf("Hora de término: %s\n", endTime.Format("2006-01-02 15:04:05"))
 			fmt.Printf("Duração: %.2f minutos\n", dur.Minutes())
 			if runID != 0 {
 				_, _ = db.Exec("UPDATE execucoes SET end_time=?, duration_minutes=?, total_combinacoes=?, status=? WHERE id=?", endTime.Format(time.RFC3339), dur.Minutes(), totalCombinacoesEncontradas, "interrupted", runID)
 			}
-			os.Exit(0)
+			return
 		default:
 		}
 
 		totalCombinacoesEncontradas++
-		// interrompe quando já geramos o suficiente a partir do checkpoint
-		if (totalCombinacoesEncontradas - últimoNum) > desiredUniqueNames {
-			break
-		}
 		arrString := sliceToString(arr)
-
-		// Gerar nome/middle/sobrenome determinístico a partir do número da combinação
 		idx := totalCombinacoesEncontradas - 1
-		F := int64(len(firstNames))
-		L := int64(len(lastNames))
-		M := int64(len(middles))
+		firstName := firstNames[int(idx%F)]
+		lastName := lastNames[int((idx/F)%L)]
+		middle := middles[int((idx/(F*L))%M)]
 
-		iF := idx % F
-		iL := (idx / F) % L
-		iM := (idx / (F * L)) % M
-
-		fn := firstNames[int(iF)]
-		mi := middles[int(iM)]
-		ln := lastNames[int(iL)]
-
-		fmt.Printf("Combinação nº %d atingida: [%s] -> %s %s %s\n", totalCombinacoesEncontradas, arrString, fn, mi, ln)
-		if _, err := db.Exec("INSERT INTO progresso (num_combinacao, combinacao, nome, middle, sobrenome) VALUES (?, ?, ?, ?, ?)", totalCombinacoesEncontradas, arrString, fn, mi, ln); err != nil {
+		if _, err := stmt.Exec(totalCombinacoesEncontradas, arrString, firstName, middle, lastName); err != nil {
+			_ = stmt.Close()
+			_ = tx.Rollback()
 			log.Fatalf("Erro ao salvar combinação nº %d: %v", totalCombinacoesEncontradas, err)
+		}
+		batchRows++
+
+		if batchRows == batchSize {
+			if err := commitInsertBatch(tx, stmt); err != nil {
+				log.Fatalf("Erro ao confirmar checkpoint nº %d: %v", totalCombinacoesEncontradas, err)
+			}
+			fmt.Printf("📦 Checkpoint salvo: %d registros\n", totalCombinacoesEncontradas)
+			batchRows = 0
+			if totalCombinacoesEncontradas < desiredUniqueNames {
+				tx, stmt, err = beginInsertBatch(db)
+				if err != nil {
+					log.Fatalf("Erro ao iniciar próximo lote: %v", err)
+				}
+			}
 		}
 
 		if !proximaPermutacao(arr) {
 			break
 		}
+	}
+	if batchRows > 0 {
+		if err := commitInsertBatch(tx, stmt); err != nil {
+			log.Fatalf("Erro ao confirmar lote final: %v", err)
+		}
+		fmt.Printf("📦 Checkpoint final salvo: %d registros\n", totalCombinacoesEncontradas)
 	}
 
 	fmt.Println("------------------------------------------------------------------")
@@ -195,6 +225,27 @@ func main() {
 	if runID != 0 {
 		_, _ = db.Exec("UPDATE execucoes SET end_time=?, duration_minutes=?, total_combinacoes=?, status=? WHERE id=?", endTime.Format(time.RFC3339), dur.Minutes(), totalCombinacoesEncontradas, "completed", runID)
 	}
+}
+
+func beginInsertBatch(db *sql.DB) (*sql.Tx, *sql.Stmt, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, nil, err
+	}
+	stmt, err := tx.Prepare("INSERT INTO progresso (num_combinacao, combinacao, nome, middle, sobrenome) VALUES (?, ?, ?, ?, ?)")
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, nil, err
+	}
+	return tx, stmt, nil
+}
+
+func commitInsertBatch(tx *sql.Tx, stmt *sql.Stmt) error {
+	if err := stmt.Close(); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 func ensureSearchIndexes(db *sql.DB) error {

@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	defaultDBFile  = "phone_book/generate_names/db/bigon_bookVIII.db"
+	defaultDBFile  = "phone_book/generate_names/db/bigon_bookV.db"
 	maxInputBytes  = 4 << 10
 	maxSearchTerms = 5
 )
