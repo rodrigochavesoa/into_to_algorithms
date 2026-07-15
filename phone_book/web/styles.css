@@ -40,6 +40,10 @@
     --token-shadow-flat: 3px 3px 0px rgba(44, 32, 24, 0.15);
 }
 
+html {
+    scrollbar-gutter: stable;
+}
+
 /* --------------------------------------------------------------------------
    2. RESET & BASE ESTILOS
    -------------------------------------------------------------------------- */
@@ -58,7 +62,11 @@ body {
     background-color: var(--token-color-desk);
     color: var(--token-color-text-dark);
     min-height: 100vh;
-    padding: var(--token-space-lg) var(--token-space-xs);
+    --body-padding-y: var(--token-space-lg);
+    padding-top: var(--body-padding-y);
+    padding-bottom: calc(var(--body-padding-y) + env(safe-area-inset-bottom));
+    padding-left: var(--token-space-xs);
+    padding-right: var(--token-space-xs);
     overflow-x: hidden;
 }
 
@@ -69,7 +77,7 @@ body {
 .tpl-desk-wrapper {
     display: flex;
     justify-content: center;
-    align-items: center;
+    align-items: flex-start;
     background-image: 
         radial-gradient(circle at 20% 20%, rgba(255, 255, 255, 0.05) 0%, transparent 60%),
         linear-gradient(135deg, #372a20 0%, #1e1510 100%);
@@ -135,6 +143,14 @@ body {
 .org-footer {
     text-align: center;
     margin-top: var(--token-space-lg);
+    padding: var(--token-space-md) var(--token-space-sm);
+    background-color: var(--token-color-paper);
+    position: relative;
+    z-index: 5;
+}
+
+.org-footer .atom-horizontal-divider {
+    display: none;
 }
 
 /* --------------------------------------------------------------------------
@@ -175,7 +191,7 @@ body {
     background-size: 100% 32px;
     border-left: 2px solid var(--token-color-red-ink); /* Margem vermelha clássica de caderno */
     border-radius: var(--token-radius-lg);
-    min-height: 80vh;
+    min-height: calc(100vh - 2 * var(--body-padding-y) - env(safe-area-inset-bottom));
 }
 
 /* Barra de pesquisa em formato de ficha de inserção */
@@ -463,6 +479,9 @@ body {
     font-size: 0.75rem;
     color: var(--token-color-text-muted);
     letter-spacing: 0.5px;
+    line-height: 1.5;
+    margin: 0;
+    display: block;
 }
 
 /* Paginação e Carregamento Retro */
@@ -510,7 +529,11 @@ body {
 /* Dispositivos Pequenos e Celulares */
 @media (max-width: 768px) {
     body {
-        padding: var(--token-space-sm) var(--token-space-xs);
+        --body-padding-y: var(--token-space-sm);
+        padding-top: var(--body-padding-y);
+        padding-bottom: calc(var(--body-padding-y) + env(safe-area-inset-bottom));
+        padding-left: var(--token-space-xs);
+        padding-right: var(--token-space-xs);
         background-image: none;
         background-color: var(--token-color-paper); /* Em celulares, exibe diretamente o papel */
     }
