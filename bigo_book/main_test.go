@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"io"
 	"strings"
 	"testing"
 
@@ -26,7 +28,7 @@ func TestLikeEscapingEndToEnd(t *testing.T) {
 
 	tests := []struct {
 		name string
-		run  func(context.Context, *sql.DB, string) ([]Record, error)
+		run  func(context.Context, *sql.DB, io.Writer, string) error
 		in   string
 		want string
 		not  string
@@ -39,16 +41,11 @@ func TestLikeEscapingEndToEnd(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			records, err := tt.run(context.Background(), db, tt.in)
-			if err != nil {
+			var output bytes.Buffer
+			if err := tt.run(context.Background(), db, &output, tt.in); err != nil {
 				t.Fatal(err)
 			}
-			var gotBuf strings.Builder
-			for _, r := range records {
-				gotBuf.WriteString(r.String())
-				gotBuf.WriteString("\n")
-			}
-			got := gotBuf.String()
+			got := output.String()
 			if !strings.Contains(got, tt.want) {
 				t.Fatalf("resultado literal ausente para %q:\n%s", tt.in, got)
 			}
@@ -91,7 +88,7 @@ func setTestLastName(t *testing.T, db *sql.DB, id int, lastName string) {
 	}
 }
 
-func TestByExactID(t *testing.T) {
+func TestByExactIDWritesToProvidedWriter(t *testing.T) {
 	db := newTestDB(t)
 	insertTestRecord(t, db, 1, "1", "Ana", "")
 
@@ -100,22 +97,15 @@ func TestByExactID(t *testing.T) {
 		want string
 	}{
 		{1, "1: [1] -> Ana"},
-		{999, ""},
+		{999, "nenhum resultado para esse número exato"},
 	}
 	for _, tt := range tests {
-		records, err := byExactID(context.Background(), db, tt.id)
-		if err != nil {
+		var output bytes.Buffer
+		if err := byExactID(context.Background(), db, &output, tt.id); err != nil {
 			t.Fatal(err)
 		}
-		var got string
-		if len(records) > 0 {
-			got = records[0].String()
-		}
-		if tt.want != "" && !strings.Contains(got, tt.want) {
-			t.Fatalf("saída para id %d = %q; esperava conter %q", tt.id, got, tt.want)
-		}
-		if tt.want == "" && got != "" {
-			t.Fatalf("saída para id %d = %q; esperava vazio", tt.id, got)
+		if !strings.Contains(output.String(), tt.want) {
+			t.Fatalf("saída para id %d = %q; esperava %q", tt.id, output.String(), tt.want)
 		}
 	}
 }
@@ -123,13 +113,13 @@ func TestByExactID(t *testing.T) {
 func TestByNameRejectsExcessSearchTerms(t *testing.T) {
 	db := newTestDB(t)
 	input := strings.Repeat("termo ", maxSearchTerms) + "extra"
+	var output bytes.Buffer
 
-	_, err := byName(context.Background(), db, input)
-	if err == nil {
-		t.Fatal("esperava erro de excesso de termos")
+	if err := byName(context.Background(), db, &output, input); err != nil {
+		t.Fatal(err)
 	}
-	want := "Use no máximo 5 termos na busca."
-	if err.Error() != want {
-		t.Fatalf("erro = %q; esperava %q", err.Error(), want)
+	want := "Use no máximo 5 termos na busca.\n"
+	if output.String() != want {
+		t.Fatalf("saída = %q; esperava %q", output.String(), want)
 	}
 }

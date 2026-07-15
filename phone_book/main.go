@@ -1,16 +1,20 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"net"
+	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -19,16 +23,29 @@ import (
 const (
 	defaultDBFile  = "phone_book/generate_names/db/bigon_bookX.db"
 	maxInputBytes  = 4 << 10
+	maxQueryBytes  = 200
 	maxSearchTerms = 5
 )
 
-// Record representa uma linha da tabela progresso.
+// Record representa um registro da tabela progresso.
 type Record struct {
-	CombinationNum int64
-	Combination    string
-	FirstName      string
-	MiddleName     sql.NullString
-	LastName       string
+	CombinationNum int64          `json:"combination_num"`
+	Combination    string         `json:"combination"`
+	FirstName      string         `json:"first_name"`
+	MiddleName     sql.NullString `json:"-"`
+	LastName       string         `json:"last_name"`
+}
+
+// MarshalJSON customiza a serialização do Record tratando MiddleName como string comum.
+func (r Record) MarshalJSON() ([]byte, error) {
+	type Alias Record
+	return json.Marshal(&struct {
+		Alias
+		MiddleName string `json:"middle_name"`
+	}{
+		Alias:      (Alias)(r),
+		MiddleName: r.MiddleName.String,
+	})
 }
 
 func (r Record) String() string {
@@ -40,6 +57,8 @@ func (r Record) String() string {
 
 func main() {
 	dbPath := flag.String("db", defaultDBFile, "caminho para o banco SQLite")
+	server := flag.Bool("server", false, "iniciar em modo servidor web")
+	port := flag.String("port", "8080", "porta do servidor web")
 	flag.Parse()
 
 	db, err := sql.Open("sqlite", *dbPath)
@@ -48,26 +67,32 @@ func main() {
 	}
 	defer db.Close()
 
+	// Configurações do pool de conexões para o SQLite.
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(time.Hour)
+
 	if err := db.PingContext(context.Background()); err != nil {
 		log.Fatalf("banco de dados %q inacessível: %v", *dbPath, err)
 	}
 
-	fmt.Println("Busca no banco de combinações")
-	fmt.Println("Digite um id, nome e/ou sobrenome:")
-	fmt.Print("> ")
-
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Buffer(make([]byte, 1024), maxInputBytes)
-	if !scanner.Scan() {
-		if err := scanner.Err(); err != nil {
-			log.Printf("erro ao ler entrada: %v", err)
-			return
-		}
-		fmt.Println("entrada inválida ou cancelada")
+	if *server {
+		startServer(db, *port)
 		return
 	}
 
-	input := strings.TrimSpace(scanner.Text())
+	// Execução em modo linha de comando.
+	fmt.Println("Busca no banco de combinações (Modo CLI)")
+	fmt.Println("Digite um id, nome e/ou sobrenome:")
+	fmt.Print("> ")
+
+	var input string
+	var buf [maxInputBytes]byte
+	n, err := os.Stdin.Read(buf[:])
+	if err != nil && err != io.EOF {
+		log.Fatalf("erro ao ler entrada: %v", err)
+	}
+	input = strings.TrimSpace(string(buf[:n]))
 	if input == "" {
 		fmt.Println("entrada vazia")
 		return
@@ -75,49 +100,60 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := search(ctx, db, os.Stdout, input); err != nil {
+
+	records, err := search(ctx, db, input)
+	if err != nil {
 		log.Fatalf("erro durante a busca: %v", err)
+	}
+
+	if len(records) == 0 {
+		fmt.Println("nenhum resultado encontrado")
+		return
+	}
+
+	for _, r := range records {
+		fmt.Println(r.String())
 	}
 }
 
-// search decide a estratégia de busca a partir do formato da entrada.
-func search(ctx context.Context, db *sql.DB, w io.Writer, input string) error {
+// search seleciona a estratégia de busca de acordo com o formato da entrada.
+func search(ctx context.Context, db *sql.DB, input string) ([]Record, error) {
+	if len(input) > maxInputBytes {
+		return nil, fmt.Errorf("entrada excede o limite de tamanho permitido")
+	}
+
 	switch {
 	case isAllDigits(input):
 		num, err := strconv.ParseInt(input, 10, 64)
 		if err != nil {
-			return fmt.Errorf("id inválido: %w", err)
+			return nil, fmt.Errorf("id inválido: %w", err)
 		}
-		return byExactID(ctx, db, w, num)
+		return byExactID(ctx, db, num)
 	case containsDigit(input):
-		return byPartialIdentifier(ctx, db, w, input)
+		return byPartialIdentifier(ctx, db, input)
 	default:
-		return byName(ctx, db, w, input)
+		return byName(ctx, db, input)
 	}
 }
 
-func byExactID(ctx context.Context, db *sql.DB, w io.Writer, num int64) error {
+func byExactID(ctx context.Context, db *sql.DB, num int64) ([]Record, error) {
 	const q = `SELECT num_combinacao, combinacao, nome, middle, sobrenome FROM progresso WHERE num_combinacao = ?`
 	var r Record
 	err := db.QueryRowContext(ctx, q, num).Scan(&r.CombinationNum, &r.Combination, &r.FirstName, &r.MiddleName, &r.LastName)
 	if err == sql.ErrNoRows {
-		fmt.Fprintln(w, "nenhum resultado para esse número exato")
-		return nil
+		return nil, nil
 	}
 	if err != nil {
-		return fmt.Errorf("busca por id: %w", err)
+		return nil, fmt.Errorf("busca por id: %w", err)
 	}
-	fmt.Fprintln(w, r.String())
-	return nil
+	return []Record{r}, nil
 }
 
-// byName interpreta a entrada na ordem convencional: nome, middle e sobrenome.
-// A comparação é exata e case-insensitive para não confundir "Ana" com "Diana".
-func byName(ctx context.Context, db *sql.DB, w io.Writer, input string) error {
+// byName busca registros associando os termos da entrada a nome, inicial/nome do meio e sobrenome.
+func byName(ctx context.Context, db *sql.DB, input string) ([]Record, error) {
 	terms := strings.Fields(input)
 	if len(terms) > maxSearchTerms {
-		_, err := fmt.Fprintf(w, "Use no máximo %d termos na busca.\n", maxSearchTerms)
-		return err
+		return nil, fmt.Errorf("Use no máximo %d termos na busca.", maxSearchTerms)
 	}
 
 	const selectPrefix = `SELECT num_combinacao, combinacao, nome, middle, sobrenome
@@ -129,7 +165,7 @@ func byName(ctx context.Context, db *sql.DB, w io.Writer, input string) error {
 	case 1:
 		query := selectPrefix + `
 			nome = ? COLLATE NOCASE OR middle = ? COLLATE NOCASE OR sobrenome = ? COLLATE NOCASE` + limit
-		return runQuery(ctx, db, w, query, terms[0], terms[0], terms[0])
+		return runQuery(ctx, db, query, terms[0], terms[0], terms[0])
 	case 2:
 		column := "sobrenome"
 		if strings.HasSuffix(terms[1], ".") {
@@ -137,31 +173,29 @@ func byName(ctx context.Context, db *sql.DB, w io.Writer, input string) error {
 		}
 		if column == "middle" {
 			query := selectPrefix + "nome = ? COLLATE NOCASE AND middle = ? COLLATE NOCASE" + limit
-			return runQuery(ctx, db, w, query, terms[0], terms[1])
+			return runQuery(ctx, db, query, terms[0], terms[1])
 		}
 		query := selectPrefix + "nome = ? COLLATE NOCASE AND sobrenome LIKE ? ESCAPE '\\'" + limit
-		return runQuery(ctx, db, w, query, terms[0], likePrefix(terms[1]))
+		return runQuery(ctx, db, query, terms[0], likePrefix(terms[1]))
 	default:
 		lastName := strings.Join(terms[2:], " ")
 		query := selectPrefix + `
 			nome = ? COLLATE NOCASE
 			AND middle = ? COLLATE NOCASE
 			AND sobrenome LIKE ? ESCAPE '\'` + limit
-		return runQuery(ctx, db, w, query, terms[0], terms[1], likePrefix(lastName))
+		return runQuery(ctx, db, query, terms[0], terms[1], likePrefix(lastName))
 	}
 }
 
-func byPartialIdentifier(ctx context.Context, db *sql.DB, w io.Writer, input string) error {
+func byPartialIdentifier(ctx context.Context, db *sql.DB, input string) ([]Record, error) {
 	const query = `SELECT num_combinacao, combinacao, nome, middle, sobrenome
 		FROM progresso
 		WHERE CAST(num_combinacao AS TEXT) LIKE ? ESCAPE '\' OR combinacao LIKE ? ESCAPE '\'
 		LIMIT 200`
 	pattern := likeContains(input)
-	return runQuery(ctx, db, w, query, pattern, pattern)
+	return runQuery(ctx, db, query, pattern, pattern)
 }
 
-// likeContains preserva a intenção de busca literal: %, _ e \\ digitados pelo
-// usuário não passam a significar curingas do SQL.
 func likeContains(s string) string {
 	s = strings.ReplaceAll(s, "\\", "\\\\")
 	s = strings.ReplaceAll(s, "%", "\\%")
@@ -176,29 +210,25 @@ func likePrefix(s string) string {
 	return s + "%"
 }
 
-func runQuery(ctx context.Context, db *sql.DB, w io.Writer, query string, args ...any) error {
+func runQuery(ctx context.Context, db *sql.DB, query string, args ...any) ([]Record, error) {
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return fmt.Errorf("query: %w", err)
+		return nil, fmt.Errorf("query: %w", err)
 	}
 	defer rows.Close()
 
-	count := 0
+	var records []Record
 	for rows.Next() {
 		var r Record
 		if err := rows.Scan(&r.CombinationNum, &r.Combination, &r.FirstName, &r.MiddleName, &r.LastName); err != nil {
-			return fmt.Errorf("scan: %w", err)
+			return nil, fmt.Errorf("scan: %w", err)
 		}
-		fmt.Fprintln(w, r.String())
-		count++
+		records = append(records, r)
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iteração do cursor: %w", err)
+		return nil, fmt.Errorf("iteração do cursor: %w", err)
 	}
-	if count == 0 {
-		fmt.Fprintln(w, "nenhum resultado encontrado")
-	}
-	return nil
+	return records, nil
 }
 
 func isAllDigits(s string) bool {
@@ -220,4 +250,169 @@ func containsDigit(s string) bool {
 		}
 	}
 	return false
+}
+
+// Servidor Web e Segurança
+
+func startServer(db *sql.DB, port string) {
+	portNum, err := strconv.Atoi(port)
+	if err != nil || portNum < 1 || portNum > 65535 {
+		log.Fatalf("porta inválida %q: use um valor entre 1 e 65535", port)
+	}
+
+	mux := http.NewServeMux()
+
+	limiter := newIPRateLimiter()
+	limiter.startCleanup(1*time.Minute, 10*time.Second)
+
+	mux.HandleFunc("/api/search", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Método não permitido"})
+			return
+		}
+
+		ip, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			ip = r.RemoteAddr
+		}
+
+		if !limiter.allow(ip, 30, 10*time.Second) {
+			w.WriteHeader(http.StatusTooManyRequests)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Muitas requisições. Por favor, aguarde um momento."})
+			return
+		}
+
+		q := r.URL.Query().Get("q")
+		q = strings.TrimSpace(q)
+
+		if q == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Termo de busca vazio"})
+			return
+		}
+
+		if len(q) > maxQueryBytes {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Termo de busca muito longo"})
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
+
+		records, err := search(ctx, db, q)
+		if err != nil {
+			log.Printf("erro na busca: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Erro interno ao executar a busca"})
+			return
+		}
+
+		if records == nil {
+			records = []Record{}
+		}
+
+		json.NewEncoder(w).Encode(records)
+	})
+
+	// Serve arquivos estáticos da interface web.
+	webDir := "web"
+	if _, err := os.Stat(webDir); os.IsNotExist(err) {
+		webDir = filepath.Clean("phone_book/web")
+	}
+	fs := http.FileServer(http.Dir(webDir))
+	mux.Handle("/", fs)
+
+	handler := securityHeaders(mux)
+	addr := ":" + port
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
+	fmt.Printf("Servidor iniciado em http://%s\n", validHostPort(port))
+	if err := server.ListenAndServe(); err != nil {
+		log.Fatalf("erro ao iniciar o servidor: %v", err)
+	}
+}
+
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload")
+		next.ServeHTTP(w, r)
+	})
+}
+
+func validHostPort(port string) string {
+	return net.JoinHostPort("localhost", port)
+}
+
+// ipRateLimiter gerencia a frequência de requisições por IP na memória.
+type ipRateLimiter struct {
+	ips map[string][]time.Time
+	mu  sync.Mutex
+}
+
+func newIPRateLimiter() *ipRateLimiter {
+	return &ipRateLimiter{ips: make(map[string][]time.Time)}
+}
+
+func (l *ipRateLimiter) allow(ip string, limit int, window time.Duration) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	now := time.Now()
+	times := l.ips[ip]
+
+	var validTimes []time.Time
+	for _, t := range times {
+		if now.Sub(t) < window {
+			validTimes = append(validTimes, t)
+		}
+	}
+
+	if len(validTimes) >= limit {
+		l.ips[ip] = validTimes
+		return false
+	}
+
+	validTimes = append(validTimes, now)
+	l.ips[ip] = validTimes
+	return true
+}
+
+// startCleanup remove IPs inativos periodicamente para liberar memória.
+func (l *ipRateLimiter) startCleanup(interval time.Duration, maxAge time.Duration) {
+	go func() {
+		for {
+			time.Sleep(interval)
+			l.mu.Lock()
+			now := time.Now()
+			for ip, times := range l.ips {
+				var validTimes []time.Time
+				for _, t := range times {
+					if now.Sub(t) < maxAge {
+						validTimes = append(validTimes, t)
+					}
+				}
+				if len(validTimes) == 0 {
+					delete(l.ips, ip)
+				} else {
+					l.ips[ip] = validTimes
+				}
+			}
+			l.mu.Unlock()
+		}
+	}()
 }
