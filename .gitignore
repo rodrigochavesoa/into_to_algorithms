@@ -2,3 +2,5 @@ phone_book/generate_names/db/*.db
 !phone_book/generate_names/db/bigon_bookV.db
 notation_bigon/db/*.db
 !notation_bigon/db/bigon_V.db
+bigo_book/generate_names/db/*.db
+!bigo_book/generate_names/db/bigon_bookV.db
