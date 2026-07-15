@@ -124,10 +124,11 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // Renderiza o próximo lote de resultados (Lazy Rendering para evitar lentidão no DOM)
-    function renderNextBatch() {
+    function renderNextBatch(isLoadMore = false) {
         const nextBatch = allRecords.slice(renderedCount, renderedCount + batchSize);
+        let firstNewCard = null;
         
-        nextBatch.forEach(record => {
+        nextBatch.forEach((record, index) => {
             const card = document.createElement('div');
             card.className = 'result-card';
 
@@ -166,6 +167,10 @@ document.addEventListener('DOMContentLoaded', () => {
             card.appendChild(cardCombination);
 
             resultsContainer.appendChild(card);
+
+            if (isLoadMore && index === 0) {
+                firstNewCard = card;
+            }
         });
 
         renderedCount += nextBatch.length;
@@ -173,6 +178,18 @@ document.addEventListener('DOMContentLoaded', () => {
         resultsCount.textContent = `${renderedCount} de ${allRecords.length} ${allRecords.length === 1 ? 'resultado' : 'resultados'}`;
         
         loadMoreBtn.hidden = renderedCount >= allRecords.length;
+
+        if (isLoadMore && firstNewCard) {
+            setTimeout(() => {
+                const rect = firstNewCard.getBoundingClientRect();
+                const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
+                const targetY = rect.top + scrollTop - 20; // 20px spacing from the top
+                window.scrollTo({
+                    top: targetY,
+                    behavior: 'smooth'
+                });
+            }, 100);
+        }
     }
 
     function showEmptyState() {
@@ -246,7 +263,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Registra clique no botão "Carregar mais"
     loadMoreBtn.addEventListener('click', () => {
-        renderNextBatch();
+        renderNextBatch(true);
     });
 
     const tabs = document.querySelectorAll('.atom-tab');
@@ -282,4 +299,87 @@ document.addEventListener('DOMContentLoaded', () => {
             tabs[activeIndex].classList.add('active-tab');
         }
     }
+
+    // ==========================================================================
+    // LÓGICA DO RETRO PAGER (VOLTAR AO TOPO)
+    // ==========================================================================
+    const retroPager = document.getElementById('retro-pager');
+    const pagerText = document.getElementById('pager-text');
+    let isPagerScrolling = false;
+
+    // Função para tocar o bip duplo clássico do Bip/Pager
+    function playPagerBeep() {
+        try {
+            const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+            if (!AudioContextClass) return;
+            const audioCtx = new AudioContextClass();
+
+            const playTone = (delay, duration, frequency) => {
+                const osc = audioCtx.createOscillator();
+                const gainNode = audioCtx.createGain();
+                osc.type = 'sine';
+                osc.frequency.value = frequency;
+                
+                gainNode.gain.setValueAtTime(0, audioCtx.currentTime + delay);
+                gainNode.gain.linearRampToValueAtTime(0.2, audioCtx.currentTime + delay + 0.01);
+                gainNode.gain.setValueAtTime(0.2, audioCtx.currentTime + delay + duration - 0.02);
+                gainNode.gain.linearRampToValueAtTime(0, audioCtx.currentTime + delay + duration);
+                
+                osc.connect(gainNode);
+                gainNode.connect(audioCtx.destination);
+                
+                osc.start(audioCtx.currentTime + delay);
+                osc.stop(audioCtx.currentTime + delay + duration);
+            };
+
+            // Toca dois bips agudos e curtos (clássico pager Motorola de 1996)
+            playTone(0, 0.08, 2200);
+            playTone(0.12, 0.08, 2200);
+        } catch (e) {
+            console.warn('AudioContext não pôde ser iniciado:', e);
+        }
+    }
+
+    // Monitora rolagem para exibir/ocultar o Pager
+    window.addEventListener('scroll', () => {
+        const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
+        if (scrollTop > 300) {
+            retroPager.classList.add('visible');
+        } else {
+            retroPager.classList.remove('visible');
+        }
+    });
+
+    // Interações de Hover (Vibração e alteração de texto do LCD)
+    retroPager.addEventListener('mouseenter', () => {
+        if (!isPagerScrolling) {
+            pagerText.textContent = 'BEEP BEEP';
+        }
+    });
+
+    retroPager.addEventListener('mouseleave', () => {
+        if (!isPagerScrolling) {
+            pagerText.textContent = '▲ TOPO ▲';
+        }
+    });
+
+    // Clique no Pager para Voltar ao Topo
+    retroPager.addEventListener('click', () => {
+        if (isPagerScrolling) return;
+
+        isPagerScrolling = true;
+        pagerText.textContent = 'REWIND...';
+        playPagerBeep();
+
+        window.scrollTo({
+            top: 0,
+            behavior: 'smooth'
+        });
+
+        // Após terminar a rolagem, redefine o texto
+        setTimeout(() => {
+            pagerText.textContent = '▲ TOPO ▲';
+            isPagerScrolling = false;
+        }, 1000);
+    });
 });

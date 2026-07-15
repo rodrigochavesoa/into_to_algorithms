@@ -224,6 +224,7 @@ body {
     display: flex;
     flex-direction: column;
     justify-content: space-between;
+    scroll-margin-top: var(--token-space-md);
 }
 
 .result-card:hover {
@@ -491,6 +492,7 @@ body {
     margin-top: var(--token-space-md);
     margin-bottom: var(--token-space-sm);
     width: 100%;
+    overflow-anchor: none;
 }
 
 .atom-button-load-more {
@@ -563,5 +565,148 @@ body {
 
     .result-card {
         padding: var(--token-space-sm);
+    }
+}
+
+/* ==========================================================================
+   8. RETRO 90S PAGER (BACK TO TOP WIDGET)
+   ========================================================================== */
+.retro-pager {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    width: 105px;
+    height: 70px;
+    background-color: #1c1c1f;
+    border: 3px solid #3a3a3e;
+    border-radius: 8px;
+    box-shadow: 4px 4px 0px rgba(0, 0, 0, 0.5), inset -2px -2px 0px #000;
+    z-index: 1000;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: opacity 0.3s ease, transform 0.2s ease;
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(20px);
+}
+
+.retro-pager.visible {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateY(0);
+}
+
+.retro-pager:hover {
+    transform: scale(1.05);
+    animation: pager-vibrate 0.15s linear infinite;
+}
+
+.retro-pager:active {
+    transform: scale(0.95);
+    box-shadow: 2px 2px 0px rgba(0, 0, 0, 0.5);
+}
+
+.pager-body {
+    width: 100%;
+    height: 100%;
+    padding: 8px 6px 6px 6px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    position: relative;
+}
+
+.pager-screen {
+    background-color: #7b946d; /* LCD verde clássico de Bip/Pager */
+    border: 2px solid #000;
+    border-radius: 3px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: inset 1px 1px 3px rgba(0, 0, 0, 0.4);
+    overflow: hidden;
+}
+
+.pager-text {
+    font-family: var(--token-font-body);
+    font-size: 0.7rem;
+    font-weight: bold;
+    color: #0b1507;
+    text-shadow: 1px 1px 0px rgba(255, 255, 255, 0.1);
+    letter-spacing: 0.5px;
+    text-align: center;
+    white-space: nowrap;
+    animation: pager-blink 1s step-end infinite;
+}
+
+.pager-buttons {
+    display: flex;
+    justify-content: flex-end;
+    gap: 4px;
+    height: 8px;
+    margin-top: 2px;
+}
+
+.pager-btn {
+    width: 12px;
+    height: 6px;
+    border: 1px solid #000;
+    border-radius: 1px;
+    box-shadow: inset 1px 1px 1px rgba(255,255,255,0.3);
+}
+
+.btn-red {
+    background-color: var(--token-color-red-ink);
+}
+
+.btn-blue {
+    background-color: #2e62a6;
+}
+
+.pager-clip {
+    position: absolute;
+    top: -5px;
+    left: 12px;
+    width: 28px;
+    height: 6px;
+    background-color: #2b2b2e;
+    border: 1px solid #111;
+    border-radius: 1px;
+    box-shadow: 1px 1px 2px rgba(0,0,0,0.5);
+}
+
+@keyframes pager-vibrate {
+    0% { transform: translate(0, 0) rotate(0deg); }
+    25% { transform: translate(1px, 1px) rotate(0.5deg); }
+    50% { transform: translate(-1px, -1px) rotate(-0.5deg); }
+    75% { transform: translate(-1px, 1px) rotate(0deg); }
+    100% { transform: translate(1px, -1px) rotate(0.5deg); }
+}
+
+@keyframes pager-blink {
+    50% { opacity: 0.4; }
+}
+
+/* Responsividade do Pager */
+@media (max-width: 768px) {
+    .retro-pager {
+        bottom: 16px;
+        right: 16px;
+        width: 90px;
+        height: 62px;
+    }
+    .pager-screen {
+        height: 28px;
+    }
+    .pager-text {
+        font-size: 0.65rem;
+    }
+    
+    /* Evita que o Pager sobreponha o texto do rodapé no mobile */
+    .org-footer {
+        padding-bottom: 85px;
     }
 }
