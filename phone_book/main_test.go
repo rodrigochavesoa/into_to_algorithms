@@ -3,8 +3,12 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -33,7 +37,9 @@ func TestLikeEscapingEndToEnd(t *testing.T) {
 	}{
 		{"percentual em identificador", byPartialIdentifier, "50%", "1: [50% concluído]", "2: [500 concluído]"},
 		{"nome e middle exatos", byName, "Ana C.", "3: [ana-c-silva]", "4: [diana-c-silva]"},
+		{"nome e middle sem ponto", byName, "Ana C", "3: [ana-c-silva]", "4: [diana-c-silva]"},
 		{"nome middle e sobrenome exatos", byName, "Ana C. Silva", "3: [ana-c-silva]", "5: [ana-ac-silva]"},
+		{"nome middle sem ponto e sobrenome", byName, "Ana C Silva", "3: [ana-c-silva]", "5: [ana-ac-silva]"},
 		{"prefixo do sobrenome", byName, "Ana C. L", "7: [ana-c-lima]", "4: [diana-c-silva]"},
 	}
 
@@ -139,17 +145,14 @@ func TestSearchRouting(t *testing.T) {
 	insertTestRecord(t, db, 1, "0 1 2", "Ana", "C.")
 	setTestLastName(t, db, 1, "Silva")
 
-	// 1. Mixed query "4500í" should route to byName (indexed, fast) and return 0 results
-	records, err := search(context.Background(), db, "4500í")
-	if err != nil {
-		t.Fatalf("search(4500í) failed: %v", err)
-	}
-	if len(records) != 0 {
-		t.Errorf("expected 0 results, got %v", records)
+	// 1. Mixed query "4500í" is not a valid search format.
+	_, err := search(context.Background(), db, "4500í")
+	if err != errInvalidSearchInput {
+		t.Fatalf("search(4500í) error = %v; expected %v", err, errInvalidSearchInput)
 	}
 
 	// 2. Pure name "Ana" should route to byName and find the record
-	records, err = search(context.Background(), db, "Ana")
+	records, err := search(context.Background(), db, "Ana")
 	if err != nil {
 		t.Fatalf("search(Ana) failed: %v", err)
 	}
@@ -166,8 +169,8 @@ func TestSearchRouting(t *testing.T) {
 		t.Errorf("expected '0 1 2', got %v", records)
 	}
 
-	// 4. Wildcard queries like "_43" and "_43%" should route to byName and return 0 results instantly
-	for _, q := range []string{"_43", "_43%", "1 2 999"} {
+	// 4. Nonexistent numeric snippets should return 0 results instantly.
+	for _, q := range []string{"1 2 999"} {
 		records, err = search(context.Background(), db, q)
 		if err != nil {
 			t.Fatalf("search(%q) failed: %v", q, err)
@@ -175,5 +178,103 @@ func TestSearchRouting(t *testing.T) {
 		if len(records) != 0 {
 			t.Errorf("expected 0 results for %q, got %v", q, records)
 		}
+	}
+
+	// 5. SQL wildcard characters are invalid user input for this search UI.
+	for _, q := range []string{"_43", "_43%"} {
+		_, err = search(context.Background(), db, q)
+		if err != errInvalidSearchInput {
+			t.Fatalf("search(%q) error = %v; expected %v", q, err, errInvalidSearchInput)
+		}
+	}
+}
+
+func TestSearchRejectsInvalidInput(t *testing.T) {
+	db := newTestDB(t)
+
+	for _, q := range []string{"99$", "Almeida.", "-Ana", "almeida-", "fd", "%Ana%", "Ana123", "Ana fd"} {
+		_, err := search(context.Background(), db, q)
+		if err == nil {
+			t.Fatalf("esperava erro para termo inválido %q", q)
+		}
+		if err != errInvalidSearchInput {
+			t.Fatalf("erro para %q = %v; esperava %v", q, err, errInvalidSearchInput)
+		}
+	}
+}
+
+func TestSearchHandlerReturnsBadRequestForInvalidInput(t *testing.T) {
+	db := newTestDB(t)
+	handler := searchHandler(db, newIPRateLimiter(), newSearchCache(time.Minute, 16), defaultServerConfig)
+
+	for _, path := range []string{
+		"/api/search?q=99%24",
+		"/api/search?q=Almeida.",
+		"/api/search?q=-Ana",
+		"/api/search?q=almeida-",
+		"/api/search?q=fd",
+		"/api/search?q=%25Ana%25",
+	} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.RemoteAddr = "127.0.0.1:12345"
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s status = %d; esperava %d; body=%s", path, rec.Code, http.StatusBadRequest, rec.Body.String())
+		}
+
+		var body map[string]string
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if body["error"] == "" || strings.Contains(strings.ToLower(body["error"]), "interno") {
+			t.Fatalf("mensagem inadequada para entrada inválida: %q", body["error"])
+		}
+		if body["error"] != invalidSearchMessage {
+			t.Fatalf("mensagem = %q; esperava %q", body["error"], invalidSearchMessage)
+		}
+	}
+}
+
+func TestSearchHandlerAppliesRateLimit(t *testing.T) {
+	db := newTestDB(t)
+	insertTestRecord(t, db, 1, "1", "Ana", "")
+	cfg := defaultServerConfig
+	cfg.rateLimitRequests = 1
+	cfg.rateLimitWindow = time.Minute
+	handler := searchHandler(db, newIPRateLimiter(), newSearchCache(time.Minute, 16), cfg)
+
+	for i, want := range []int{http.StatusOK, http.StatusTooManyRequests} {
+		req := httptest.NewRequest(http.MethodGet, "/api/search?q=Ana", nil)
+		req.RemoteAddr = "127.0.0.1:12345"
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != want {
+			t.Fatalf("requisição %d status = %d; esperava %d; body=%s", i+1, rec.Code, want, rec.Body.String())
+		}
+	}
+}
+
+func TestSearchCacheNormalizesAndClonesResults(t *testing.T) {
+	cache := newSearchCache(time.Minute, 16)
+	key := normalizeCacheKey("  Ana   SILVA  ")
+	cache.set(key, []Record{{CombinationNum: 1, Combination: "1", FirstName: "Ana", LastName: "Silva"}})
+
+	records, ok := cache.get(normalizeCacheKey("ana silva"))
+	if !ok {
+		t.Fatal("esperava cache hit")
+	}
+	records[0].FirstName = "Alterado"
+
+	records, ok = cache.get(key)
+	if !ok {
+		t.Fatal("esperava segundo cache hit")
+	}
+	if records[0].FirstName != "Ana" {
+		t.Fatalf("cache retornou slice compartilhado: %q", records[0].FirstName)
 	}
 }

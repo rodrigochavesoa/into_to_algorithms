@@ -65,7 +65,7 @@
                                 type="text" 
                                 id="search-input" 
                                 class="atom-input"
-                                placeholder="Digite o id, nome ou iniciais..." 
+                                placeholder="Ex.: 99, Carlos, Almeida, Ana B..." 
                                 autocomplete="off"
                                 maxlength="200"
                                 aria-label="Campo de busca"
@@ -73,6 +73,9 @@
                             >
                             <button type="button" id="clear-btn" class="clear-button atom-button-clear" aria-label="Limpar busca" hidden>
                                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                            </button>
+                            <button type="submit" id="search-btn" class="atom-button-search" aria-label="Executar busca">
+                                Buscar
                             </button>
                         </div>
                     </form>
@@ -133,6 +136,6 @@
     </div>
 
     <!-- JS Principal -->
-    <script src="app.js"></script>
+    <script src="app.js?v=20260715-confirmed-search"></script>
 </body>
 </html>

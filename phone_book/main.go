@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	_ "modernc.org/sqlite"
 )
@@ -26,6 +28,26 @@ const (
 	maxQueryBytes  = 200
 	maxSearchTerms = 5
 )
+
+var errInvalidSearchInput = errors.New("termo de busca contém caracteres inválidos")
+
+const invalidSearchMessage = "Formato de busca inválido. Busque por ID, nome, sobrenome ou nome completo. Exemplos: 99, Carlos, Almeida, Ana B, Ana B Almeida."
+
+type serverConfig struct {
+	rateLimitRequests int
+	rateLimitWindow   time.Duration
+	searchTimeout     time.Duration
+	cacheTTL          time.Duration
+	cacheMaxEntries   int
+}
+
+var defaultServerConfig = serverConfig{
+	rateLimitRequests: 20,
+	rateLimitWindow:   10 * time.Second,
+	searchTimeout:     2 * time.Second,
+	cacheTTL:          30 * time.Second,
+	cacheMaxEntries:   256,
+}
 
 // Record representa um registro da tabela progresso.
 type Record struct {
@@ -75,6 +97,9 @@ func main() {
 	if err := db.PingContext(context.Background()); err != nil {
 		log.Fatalf("banco de dados %q inacessível: %v", *dbPath, err)
 	}
+	if err := ensureSearchIndexes(db); err != nil {
+		log.Fatalf("erro ao preparar índices de busca: %v", err)
+	}
 
 	if *server {
 		startServer(db, *port)
@@ -121,6 +146,12 @@ func search(ctx context.Context, db *sql.DB, input string) ([]Record, error) {
 	if len(input) > maxInputBytes {
 		return nil, fmt.Errorf("entrada excede o limite de tamanho permitido")
 	}
+	if !isValidSearchInput(input) {
+		return nil, errInvalidSearchInput
+	}
+	if len(strings.Fields(input)) > maxSearchTerms {
+		return nil, fmt.Errorf("Use no máximo %d termos na busca.", maxSearchTerms)
+	}
 
 	switch {
 	case isAllDigits(input):
@@ -156,35 +187,80 @@ func byName(ctx context.Context, db *sql.DB, input string) ([]Record, error) {
 		return nil, fmt.Errorf("Use no máximo %d termos na busca.", maxSearchTerms)
 	}
 
-	const selectPrefix = `SELECT num_combinacao, combinacao, nome, middle, sobrenome
-		FROM progresso
-		WHERE `
 	const limit = ` LIMIT 200`
 
 	switch len(terms) {
 	case 1:
-		query := selectPrefix + `
-			nome = ? COLLATE NOCASE OR middle = ? COLLATE NOCASE OR sobrenome = ? COLLATE NOCASE` + limit
-		return runQuery(ctx, db, query, terms[0], terms[0], terms[0])
+		return bySingleNameTerm(ctx, db, terms[0], 200)
 	case 2:
+		const selectPrefix = `SELECT num_combinacao, combinacao, nome, middle, sobrenome
+			FROM progresso
+			WHERE `
 		column := "sobrenome"
-		if strings.HasSuffix(terms[1], ".") {
+		secondTerm := terms[1]
+		if isMiddleInitial(secondTerm) {
 			column = "middle"
+			secondTerm = normalizeMiddleInitial(secondTerm)
 		}
 		if column == "middle" {
 			query := selectPrefix + "nome = ? COLLATE NOCASE AND middle = ? COLLATE NOCASE" + limit
-			return runQuery(ctx, db, query, terms[0], terms[1])
+			return runQuery(ctx, db, query, terms[0], secondTerm)
 		}
 		query := selectPrefix + "nome = ? COLLATE NOCASE AND sobrenome LIKE ? ESCAPE '\\'" + limit
 		return runQuery(ctx, db, query, terms[0], likePrefix(terms[1]))
 	default:
+		const selectPrefix = `SELECT num_combinacao, combinacao, nome, middle, sobrenome
+			FROM progresso
+			WHERE `
 		lastName := strings.Join(terms[2:], " ")
+		middle := normalizeMiddleInitial(terms[1])
 		query := selectPrefix + `
 			nome = ? COLLATE NOCASE
 			AND middle = ? COLLATE NOCASE
 			AND sobrenome LIKE ? ESCAPE '\'` + limit
-		return runQuery(ctx, db, query, terms[0], terms[1], likePrefix(lastName))
+		return runQuery(ctx, db, query, terms[0], middle, likePrefix(lastName))
 	}
+}
+
+func bySingleNameTerm(ctx context.Context, db *sql.DB, term string, limit int) ([]Record, error) {
+	queries := []string{
+		`SELECT num_combinacao, combinacao, nome, middle, sobrenome
+			FROM progresso
+			WHERE nome = ? COLLATE NOCASE
+			LIMIT ?`,
+		`SELECT num_combinacao, combinacao, nome, middle, sobrenome
+			FROM progresso
+			WHERE middle = ? COLLATE NOCASE
+			LIMIT ?`,
+		`SELECT num_combinacao, combinacao, nome, middle, sobrenome
+			FROM progresso
+			WHERE sobrenome = ? COLLATE NOCASE
+			LIMIT ?`,
+	}
+
+	seen := make(map[int64]struct{})
+	records := make([]Record, 0, limit)
+	for _, query := range queries {
+		remaining := limit - len(records)
+		if remaining <= 0 {
+			break
+		}
+		next, err := runQuery(ctx, db, query, term, remaining)
+		if err != nil {
+			return nil, err
+		}
+		for _, record := range next {
+			if _, ok := seen[record.CombinationNum]; ok {
+				continue
+			}
+			seen[record.CombinationNum] = struct{}{}
+			records = append(records, record)
+			if len(records) == limit {
+				break
+			}
+		}
+	}
+	return records, nil
 }
 
 func byPartialIdentifier(ctx context.Context, db *sql.DB, input string) ([]Record, error) {
@@ -262,6 +338,93 @@ func isPartialIdentifier(s string) bool {
 	return hasDigit && strings.Contains(s, " ")
 }
 
+func isValidSearchInput(s string) bool {
+	terms := strings.Fields(s)
+	if len(terms) == 0 || len(terms) > maxSearchTerms {
+		return false
+	}
+
+	if len(terms) == 1 {
+		return isAllDigits(terms[0]) || isValidNameTerm(terms[0])
+	}
+
+	allNumeric := true
+	for _, term := range terms {
+		if !isAllDigits(term) {
+			allNumeric = false
+			break
+		}
+	}
+	if allNumeric {
+		return true
+	}
+
+	if !isValidNameTerm(terms[0]) {
+		return false
+	}
+	if len(terms) >= 3 && !isMiddleInitial(terms[1]) {
+		return false
+	}
+	for i, term := range terms[1:] {
+		if i == 0 && isMiddleInitial(term) {
+			continue
+		}
+		if !isValidNameTerm(term) {
+			return false
+		}
+	}
+	return true
+}
+
+func isValidNameTerm(term string) bool {
+	if term == "" {
+		return false
+	}
+
+	runes := []rune(term)
+	if len(runes) < 3 {
+		return false
+	}
+	for _, r := range runes {
+		if !unicode.IsLetter(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func isMiddleInitial(term string) bool {
+	runes := []rune(term)
+	if len(runes) == 1 {
+		return unicode.IsLetter(runes[0])
+	}
+	return len(runes) == 2 && unicode.IsLetter(runes[0]) && runes[1] == '.'
+}
+
+func normalizeMiddleInitial(term string) string {
+	runes := []rune(term)
+	if len(runes) == 1 && unicode.IsLetter(runes[0]) {
+		return string(runes[0]) + "."
+	}
+	return term
+}
+
+func ensureSearchIndexes(db *sql.DB) error {
+	statements := []string{
+		"CREATE INDEX IF NOT EXISTS idx_progresso_num_combinacao ON progresso(num_combinacao)",
+		"CREATE INDEX IF NOT EXISTS idx_progresso_nome_nocase ON progresso(nome COLLATE NOCASE)",
+		"CREATE INDEX IF NOT EXISTS idx_progresso_middle_nocase ON progresso(middle COLLATE NOCASE)",
+		"CREATE INDEX IF NOT EXISTS idx_progresso_sobrenome_nocase ON progresso(sobrenome COLLATE NOCASE)",
+		"CREATE INDEX IF NOT EXISTS idx_progresso_nome_completo_nocase ON progresso(nome COLLATE NOCASE, middle COLLATE NOCASE, sobrenome COLLATE NOCASE)",
+	}
+	for _, statement := range statements {
+		if _, err := db.Exec(statement); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Servidor Web e Segurança
 
 func startServer(db *sql.DB, port string) {
@@ -274,59 +437,9 @@ func startServer(db *sql.DB, port string) {
 
 	limiter := newIPRateLimiter()
 	limiter.startCleanup(1*time.Minute, 10*time.Second)
+	cache := newSearchCache(defaultServerConfig.cacheTTL, defaultServerConfig.cacheMaxEntries)
 
-	mux.HandleFunc("/api/search", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-
-		if r.Method != http.MethodGet {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Método não permitido"})
-			return
-		}
-
-		ip, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil {
-			ip = r.RemoteAddr
-		}
-
-		if !limiter.allow(ip, 30, 10*time.Second) {
-			w.WriteHeader(http.StatusTooManyRequests)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Muitas requisições. Por favor, aguarde um momento."})
-			return
-		}
-
-		q := r.URL.Query().Get("q")
-		q = strings.TrimSpace(q)
-
-		if q == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Termo de busca vazio"})
-			return
-		}
-
-		if len(q) > maxQueryBytes {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Termo de busca muito longo"})
-			return
-		}
-
-		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
-		defer cancel()
-
-		records, err := search(ctx, db, q)
-		if err != nil {
-			log.Printf("erro na busca: %v", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Erro interno ao executar a busca"})
-			return
-		}
-
-		if records == nil {
-			records = []Record{}
-		}
-
-		json.NewEncoder(w).Encode(records)
-	})
+	mux.Handle("/api/search", searchHandler(db, limiter, cache, defaultServerConfig))
 
 	// Serve arquivos estáticos da interface web.
 	webDir := "web"
@@ -353,6 +466,87 @@ func startServer(db *sql.DB, port string) {
 	}
 }
 
+func searchHandler(db *sql.DB, limiter *ipRateLimiter, cache *searchCache, cfg serverConfig) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Método não permitido"})
+			return
+		}
+
+		ip, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			ip = r.RemoteAddr
+		}
+
+		if !limiter.allow(ip, cfg.rateLimitRequests, cfg.rateLimitWindow) {
+			log.Printf("rate_limit ip=%s path=%s", ip, r.URL.Path)
+			w.WriteHeader(http.StatusTooManyRequests)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Muitas requisições. Por favor, aguarde um momento."})
+			return
+		}
+
+		q := r.URL.Query().Get("q")
+		q = strings.TrimSpace(q)
+
+		if q == "" {
+			log.Printf("bad_request ip=%s reason=empty_query", ip)
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Termo de busca vazio"})
+			return
+		}
+
+		if len(q) > maxQueryBytes {
+			log.Printf("bad_request ip=%s reason=query_too_long bytes=%d", ip, len(q))
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Termo de busca muito longo"})
+			return
+		}
+
+		cacheKey := normalizeCacheKey(q)
+		if records, ok := cache.get(cacheKey); ok {
+			json.NewEncoder(w).Encode(records)
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), cfg.searchTimeout)
+		defer cancel()
+
+		records, err := search(ctx, db, q)
+		if err != nil {
+			if errors.Is(err, errInvalidSearchInput) {
+				log.Printf("bad_request ip=%s reason=invalid_query", ip)
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": invalidSearchMessage})
+				return
+			}
+			if errors.Is(err, context.Canceled) {
+				log.Printf("request_canceled ip=%s", ip)
+				return
+			}
+			if errors.Is(err, context.DeadlineExceeded) {
+				log.Printf("search_timeout ip=%s", ip)
+				w.WriteHeader(http.StatusServiceUnavailable)
+				json.NewEncoder(w).Encode(map[string]string{"error": "Não foi possível concluir a busca agora. Tente um termo mais específico."})
+				return
+			}
+			log.Printf("erro na busca: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Erro interno ao executar a busca"})
+			return
+		}
+
+		if records == nil {
+			records = []Record{}
+		}
+
+		cache.set(cacheKey, records)
+		json.NewEncoder(w).Encode(records)
+	})
+}
+
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'")
@@ -366,6 +560,94 @@ func securityHeaders(next http.Handler) http.Handler {
 
 func validHostPort(port string) string {
 	return net.JoinHostPort("localhost", port)
+}
+
+type cachedSearch struct {
+	records   []Record
+	expiresAt time.Time
+}
+
+type searchCache struct {
+	items      map[string]cachedSearch
+	ttl        time.Duration
+	maxEntries int
+	mu         sync.Mutex
+}
+
+func newSearchCache(ttl time.Duration, maxEntries int) *searchCache {
+	return &searchCache{
+		items:      make(map[string]cachedSearch),
+		ttl:        ttl,
+		maxEntries: maxEntries,
+	}
+}
+
+func normalizeCacheKey(q string) string {
+	return strings.ToLower(strings.Join(strings.Fields(q), " "))
+}
+
+func (c *searchCache) get(key string) ([]Record, bool) {
+	if c == nil || c.ttl <= 0 || c.maxEntries <= 0 {
+		return nil, false
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	item, ok := c.items[key]
+	if !ok {
+		return nil, false
+	}
+	if time.Now().After(item.expiresAt) {
+		delete(c.items, key)
+		return nil, false
+	}
+	return cloneRecords(item.records), true
+}
+
+func (c *searchCache) set(key string, records []Record) {
+	if c == nil || c.ttl <= 0 || c.maxEntries <= 0 {
+		return
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if len(c.items) >= c.maxEntries {
+		c.evictExpiredOrOldest()
+	}
+	c.items[key] = cachedSearch{
+		records:   cloneRecords(records),
+		expiresAt: time.Now().Add(c.ttl),
+	}
+}
+
+func (c *searchCache) evictExpiredOrOldest() {
+	now := time.Now()
+	var oldestKey string
+	var oldestExpiry time.Time
+	for key, item := range c.items {
+		if now.After(item.expiresAt) {
+			delete(c.items, key)
+			return
+		}
+		if oldestKey == "" || item.expiresAt.Before(oldestExpiry) {
+			oldestKey = key
+			oldestExpiry = item.expiresAt
+		}
+	}
+	if oldestKey != "" {
+		delete(c.items, oldestKey)
+	}
+}
+
+func cloneRecords(records []Record) []Record {
+	if records == nil {
+		return []Record{}
+	}
+	out := make([]Record, len(records))
+	copy(out, records)
+	return out
 }
 
 // ipRateLimiter gerencia a frequência de requisições por IP na memória.

@@ -385,6 +385,30 @@ body {
     color: var(--token-color-text-dark);
 }
 
+.atom-button-search {
+    flex: 0 0 auto;
+    background-color: var(--token-color-green-ink);
+    color: var(--token-color-paper);
+    border: 1px solid var(--token-color-text-dark);
+    border-radius: var(--token-radius-sm);
+    padding: 6px 12px;
+    font-family: var(--token-font-sans);
+    font-size: 0.85rem;
+    font-weight: 700;
+    cursor: pointer;
+    box-shadow: 2px 2px 0 rgba(44, 32, 24, 0.22);
+    transition: background-color 0.2s ease, transform 0.1s ease, box-shadow 0.1s ease;
+}
+
+.atom-button-search:hover {
+    background-color: #335a3f;
+}
+
+.atom-button-search:active {
+    transform: translate(1px, 1px);
+    box-shadow: 1px 1px 0 rgba(44, 32, 24, 0.22);
+}
+
 /* Badges e Fichas */
 .atom-badge-count {
     font-family: var(--token-font-sans);

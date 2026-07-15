@@ -7,7 +7,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const errorMessage = document.getElementById('error-message');
     const loadMoreBtn = document.getElementById('load-more-btn');
 
-    let debounceTimeout = null;
     let currentSearchTerm = '';
     let activeAbortController = null;
 
@@ -15,16 +14,13 @@ document.addEventListener('DOMContentLoaded', () => {
     let renderedCount = 0;
     const batchSize = 20;
 
-    // Lógica para detectar digitação com debounce (300ms)
+    // Durante a digitação, apenas atualiza controles locais.
+    // A busca só é executada quando o usuário confirma o formulário.
     searchInput.addEventListener('input', () => {
         const query = searchInput.value.trim();
         
         // Controla exibição do botão limpar
         clearBtn.hidden = query.length === 0;
-
-        if (query === currentSearchTerm) return;
-        
-        clearTimeout(debounceTimeout);
 
         if (query.length === 0) {
             currentSearchTerm = '';
@@ -35,10 +31,6 @@ document.addEventListener('DOMContentLoaded', () => {
             showEmptyState();
             return;
         }
-
-        debounceTimeout = setTimeout(() => {
-            performSearch(query);
-        }, 300);
     });
 
     // Limpar busca
@@ -58,10 +50,11 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('search-form').addEventListener('submit', (e) => {
         e.preventDefault();
         const query = searchInput.value.trim();
-        if (query.length > 0) {
-            clearTimeout(debounceTimeout);
-            performSearch(query);
+        if (query.length === 0) {
+            showEmptyState();
+            return;
         }
+        performSearch(query);
     });
 
     // Realiza a requisição assíncrona para a API Go
