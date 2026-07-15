@@ -129,7 +129,7 @@ func search(ctx context.Context, db *sql.DB, input string) ([]Record, error) {
 			return nil, fmt.Errorf("id inválido: %w", err)
 		}
 		return byExactID(ctx, db, num)
-	case containsDigit(input):
+	case isPartialIdentifier(input):
 		return byPartialIdentifier(ctx, db, input)
 	default:
 		return byName(ctx, db, input)
@@ -243,13 +243,23 @@ func isAllDigits(s string) bool {
 	return true
 }
 
-func containsDigit(s string) bool {
-	for _, r := range s {
-		if r >= '0' && r <= '9' {
-			return true
-		}
+func isPartialIdentifier(s string) bool {
+	hasDigit := false
+	tokens := strings.Fields(s)
+	if len(tokens) == 0 {
+		return false
 	}
-	return false
+	for _, token := range tokens {
+		if len(token) != 1 {
+			return false
+		}
+		r := token[0]
+		if r < '0' || r > '9' {
+			return false
+		}
+		hasDigit = true
+	}
+	return hasDigit && strings.Contains(s, " ")
 }
 
 // Servidor Web e Segurança

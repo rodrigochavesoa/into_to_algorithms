@@ -133,3 +133,47 @@ func TestByNameRejectsExcessSearchTerms(t *testing.T) {
 		t.Fatalf("erro = %q; esperava %q", err.Error(), want)
 	}
 }
+
+func TestSearchRouting(t *testing.T) {
+	db := newTestDB(t)
+	insertTestRecord(t, db, 1, "0 1 2", "Ana", "C.")
+	setTestLastName(t, db, 1, "Silva")
+
+	// 1. Mixed query "4500í" should route to byName (indexed, fast) and return 0 results
+	records, err := search(context.Background(), db, "4500í")
+	if err != nil {
+		t.Fatalf("search(4500í) failed: %v", err)
+	}
+	if len(records) != 0 {
+		t.Errorf("expected 0 results, got %v", records)
+	}
+
+	// 2. Pure name "Ana" should route to byName and find the record
+	records, err = search(context.Background(), db, "Ana")
+	if err != nil {
+		t.Fatalf("search(Ana) failed: %v", err)
+	}
+	if len(records) != 1 || records[0].FirstName != "Ana" {
+		t.Errorf("expected Ana, got %v", records)
+	}
+
+	// 3. Combination snippet "0 1" should route to byPartialIdentifier and find the record
+	records, err = search(context.Background(), db, "0 1")
+	if err != nil {
+		t.Fatalf("search(0 1) failed: %v", err)
+	}
+	if len(records) != 1 || records[0].Combination != "0 1 2" {
+		t.Errorf("expected '0 1 2', got %v", records)
+	}
+
+	// 4. Wildcard queries like "_43" and "_43%" should route to byName and return 0 results instantly
+	for _, q := range []string{"_43", "_43%", "1 2 999"} {
+		records, err = search(context.Background(), db, q)
+		if err != nil {
+			t.Fatalf("search(%q) failed: %v", q, err)
+		}
+		if len(records) != 0 {
+			t.Errorf("expected 0 results for %q, got %v", q, records)
+		}
+	}
+}
